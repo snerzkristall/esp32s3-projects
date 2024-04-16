@@ -1,2 +1,3 @@
 sensors_and_boards/
 gy521/build/
+gy521/sdkconfig

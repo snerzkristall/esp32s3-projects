@@ -73,64 +73,126 @@ static esp_err_t mpu6050_write(uint8_t reg_addr, uint8_t data)
 /**
  * @brief Read 3-axis acceleration of MPU6050 sensor registers and correct raw values
  */
-static double * mpu6050_get_accel()
+static void mpu6050_get_accel(double *accel, int16_t fsr)
 {
     uint8_t buf[6];
-    double *accel = (double *)malloc(3 * sizeof(double));
     ESP_ERROR_CHECK(mpu6050_read(MPU6050_RA_ACCEL_XOUT_H, buf, 6));
     for (int i = 0; i < 3; i++)
     {
         int16_t raw = (int16_t)(buf[2*i] << 8 | buf[2*i+1]); // combine registers
-        accel[i] = (double)(raw - mpu6050_nonideal.accel_offset[i]) / mpu6050_nonideal.accel_gain[i] / 16384.0; // adjust to calibration
+        accel[i] = (double)(raw - mpu6050_nonideal.accel_offset[i]) / mpu6050_nonideal.accel_gain[i]; // adjust to calibration
+        accel[i] = accel[i] / 32768 * fsr; // scale to fsr
     }
-    return accel;
+}
+
+/**
+ * @brief Read 3-axis angular change of MPU6050 sensor registers and correct raw values
+ */
+static void mpu6050_get_gyro(double *gyro, int16_t fsr)
+{
+    uint8_t buf[6];
+    ESP_ERROR_CHECK(mpu6050_read(MPU6050_RA_GYRO_XOUT_H, buf, 6));
+    for (int i = 0; i < 3; i++)
+    {
+        int16_t raw = (int16_t)(buf[2*i] << 8 | buf[2*i+1]); // combine registers
+        gyro[i] = (double)(raw - mpu6050_nonideal.gyro_offset[i]) / mpu6050_nonideal.gyro_gain[i]; // adjust to calibration
+        gyro[i] = gyro[i] / 32768 * fsr;
+    }
 }
 
 /**
  * @brief Calculate angles from 3-axis accelerometer values
  */
-static double * calc_angle(double *accel, uint8_t degree_opt)
+static void calc_angle_accel(double *curr_angle, double *accel, uint8_t degree_opt)
 {
-    double *angle = (double *)malloc(3 * sizeof(double));
-    double conversion = degree_opt ? (180.0 / M_PI) : 1;
-    angle[0] = atan2(accel[0], sqrt(pow(accel[1],2) + pow(accel[2],2))) * conversion; // theta
-    angle[1] = atan2(accel[1], sqrt(pow(accel[0],2) + pow(accel[2],2))) * conversion; // psi
-    angle[2] = atan2(sqrt(pow(accel[0],2) + pow(accel[1],2)), accel[2]) * conversion; // phi
+    double conversion = degree_opt ? (180. / M_PI) : 1; // degrees or radiant
+    curr_angle[0] = atan(accel[1] / sqrt(pow(accel[0],2) + pow(accel[2],2))) * conversion; // roll
+    curr_angle[1] = -atan(accel[0] / sqrt(pow(accel[1],2) + pow(accel[2],2))) * conversion; // pitch
+}
 
-    return angle;
+/**
+ * @brief Calculate angles from 3-axis gyroscope values
+ */
+static void calc_angle_gyro(double *curr_angle, double *gyro, int16_t t_sample, uint8_t degree_opt)
+{
+    double conversion = degree_opt ? (180. / M_PI) : 1; // degrees or radiant
+    double scale = (float)(t_sample) / 1000.;
+    for (int i = 0; i < 3; i++)
+    {
+        curr_angle[i] = curr_angle[i] + (gyro[i] * scale * conversion);
+    }
 }
 
 /**
  * @brief Initialization of MPU6050
  */
-static void mpu6050_init()
+static void mpu6050_init(int16_t fsr_accel, int16_t fsr_gyro)
 {
+    // wake mpu6050 up from sleep
     ESP_ERROR_CHECK(mpu6050_write(MPU6050_RA_PWR_MGMT_1, 0 << MPU6050_PWR1_SLEEP_BIT));
     ESP_LOGI(TAG, "MPU6050: awake");
 
-    ESP_ERROR_CHECK(mpu6050_write(MPU6050_RA_ACCEL_CONFIG, MPU6050_ACCEL_FS_2 << MPU6050_ACONFIG_AFS_SEL_BIT));
-    ESP_LOGI(TAG, "MPU6050: accel FSR --> 2g");
+    // configure accerelometer
+    int16_t MPU6050_ACCEL_FS;
+    switch(fsr_accel){
+        case 2: MPU6050_ACCEL_FS = MPU6050_ACCEL_FS_2; break;
+        case 4: MPU6050_ACCEL_FS = MPU6050_ACCEL_FS_4; break;
+        case 8: MPU6050_ACCEL_FS = MPU6050_ACCEL_FS_8; break;
+        case 16: MPU6050_ACCEL_FS = MPU6050_ACCEL_FS_16; break;
+        default: MPU6050_ACCEL_FS = MPU6050_ACCEL_FS_2;
+    }
+    ESP_ERROR_CHECK(mpu6050_write(MPU6050_RA_ACCEL_CONFIG, MPU6050_ACCEL_FS << MPU6050_ACONFIG_AFS_SEL_BIT));
+    ESP_LOGI(TAG, "MPU6050: accel FSR --> +/- %dg", fsr_accel);
+
+    // configure accerelometer
+    int16_t MPU6050_GYRO_FS;
+    switch(fsr_accel){
+        case 250: MPU6050_GYRO_FS = MPU6050_GYRO_FS_250; break;
+        case 500: MPU6050_GYRO_FS = MPU6050_GYRO_FS_500; break;
+        case 1000: MPU6050_GYRO_FS = MPU6050_GYRO_FS_1000; break;
+        case 2000: MPU6050_GYRO_FS = MPU6050_GYRO_FS_2000; break;
+        default: MPU6050_GYRO_FS = MPU6050_GYRO_FS_250;
+    }
+    ESP_ERROR_CHECK(mpu6050_write(MPU6050_RA_ACCEL_CONFIG, MPU6050_GYRO_FS << MPU6050_ACONFIG_AFS_SEL_BIT));
+    ESP_LOGI(TAG, "MPU6050: gyro FSR --> +/- %d°/s", fsr_gyro);
 }
 
 void mpu6050_task(){
 
-    mpu6050_init();
+    // full scale ranges
+    int16_t fsr_accel = 2;
+    int16_t fsr_gyro = 250;
 
-    double *accel;
-    double *angle;
+    // sampling
+    int16_t t_sample = 50;
+    double f_sample = (double)(1000 / t_sample);
+
+    // sensor and task variables
+    double *accel = (double *)calloc(3, sizeof(double));
+    double *gyro = (double *)calloc(3, sizeof(double));
+    double *angle_accel = (double *)calloc(2, sizeof(double)); // roll, pitch
+    double *angle_gyro = (double *)calloc(3, sizeof(double)); // roll, pitch, yaw
     uint8_t degree_opt = 1;
+
+    // configure mpu6050
+    mpu6050_init(fsr_accel, fsr_gyro);
 
     while(1){
 
-        accel = mpu6050_get_accel();
-        //printf("[ACCEL]\tX: %.3f\tY: %.3f\tZ: %.3f\r\n", accel[0], accel[1], accel[2]);
+        // read registers
+        mpu6050_get_accel(accel, fsr_accel);
+        mpu6050_get_gyro(gyro, fsr_gyro);
 
-        angle = calc_angle(accel, degree_opt);
-        printf("[ANGLE]\ttheta: %.f\tpsi: %.f\t\tphi: %.f\r\n", angle[0], angle[1], angle[2]); 
+        // basic angle calculation
+        calc_angle_accel(angle_accel, accel, degree_opt);
+        calc_angle_gyro(angle_gyro, gyro, t_sample, degree_opt);
+
+        // 2D serial plotting
+        printf("%2.2f,%2.2f,%2.2f,%2.2f\n", angle_accel[0], angle_accel[1], (float)((int16_t)(angle_gyro[0]) % 90), (float)((int16_t)(angle_gyro[1]) % 90));
 
         fflush(stdout);
 
-        vTaskDelay(100 / portTICK_PERIOD_MS);
+        vTaskDelay(t_sample / portTICK_PERIOD_MS);
     }
 }
 
