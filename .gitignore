@@ -1,3 +1,6 @@
+# Ignore build folders and sdkconfig files in projects
+*/build/
+*/sdkconfig
+
+# Ignore the senors_and_boards folder
 sensors_and_boards/
-**/build/
-**/sdkconfig
